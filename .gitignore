@@ -1,0 +1,25 @@
+# Secrets & credentials
+.env
+apifytoken.txt
+geminiapikey.txt
+client_secret_*.json
+*.key
+*.pem
+
+# Runtime data & local state
+lead_runs/
+lead_system/data/
+.hk-agents/
+auth_gateway/data/
+whatsapp_sender/.env
+whatsapp_sender/auth/
+whatsapp_sender/auth-backup*/
+whatsapp_sender/state/
+
+# Dependencies & caches
+__pycache__/
+*.pyc
+whatsapp_sender/node_modules/
+auth_gateway/node_modules/
+qa-chrome-profile*/
+Claude Setup.exe
