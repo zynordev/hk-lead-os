@@ -1,0 +1,17 @@
+[Unit]
+Description=HK Yazilim WhatsApp sender
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/public-relations/whatsapp_sender
+EnvironmentFile=/opt/public-relations/whatsapp_sender/.env
+ExecStart=/usr/bin/node /opt/public-relations/whatsapp_sender/src/server.mjs
+Restart=always
+RestartSec=8
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

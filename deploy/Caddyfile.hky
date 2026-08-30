@@ -1,0 +1,23 @@
+# Emma Web UI (API Gateway) -> Pi 5 Chloe Web Dashboard
+emma.bilgicoderteam.tr {
+    reverse_proxy 100.91.231.30:8667
+}
+
+# Existing OTA server listens directly on public :8090; it is intentionally not
+# declared in Caddy because Caddy runs with host networking and would collide.
+
+# MailBridge
+mail.bilgicoderteam.tr {
+    reverse_proxy localhost:2525
+}
+
+# HomeAI API Gateway
+homeai.bilgicoderteam.tr {
+    reverse_proxy localhost:11434
+}
+
+# HK LeadOS: passkey gateway is the only public entry point.
+hky.bilgicoderteam.tr {
+    reverse_proxy 127.0.0.1:8800
+    encode gzip
+}

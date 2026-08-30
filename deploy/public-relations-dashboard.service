@@ -1,0 +1,19 @@
+[Unit]
+Description=HK Yazilim LeadOS dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/public-relations
+EnvironmentFile=/opt/public-relations/whatsapp_sender/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=HK_AGENTS_ROOT=/root/hk-agents
+ExecStart=/opt/public-relations/.venv/bin/python -m lead_system.run_dashboard
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

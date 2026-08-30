@@ -1,0 +1,18 @@
+[Unit]
+Description=HK LeadOS Passkey authentication gateway
+After=network-online.target public-relations-dashboard.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/public-relations/auth_gateway
+EnvironmentFile=/opt/public-relations/auth_gateway/.env
+ExecStart=/usr/bin/node /opt/public-relations/auth_gateway/server.mjs
+Restart=always
+RestartSec=5
+User=root
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
