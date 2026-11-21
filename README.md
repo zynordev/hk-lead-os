@@ -1,6 +1,8 @@
 # HK LeadOS — AI-Powered B2B Lead Discovery & Digital Presence Audit
 
-**HK LeadOS** is a self-hosted, human-in-the-loop B2B lead discovery and website-audit platform built for web agencies and freelancers. It discovers local businesses in Turkey via **Apify Google Maps**, checks their website health, searches the web to uncover **hidden websites and commission-based delivery/advertising platforms** (Yemeksepeti, GetirYemek, Trendyol Yemek, Migros Yemek, Uber Eats, Instagram, TripAdvisor), scores opportunities deterministically + with **Gemini AI**, and manages manual approval before any outreach.
+[![LeadOS CI](https://github.com/zynordev/hk-lead-os/actions/workflows/ci.yml/badge.svg)](https://github.com/zynordev/hk-lead-os/actions/workflows/ci.yml)
+
+**HK LeadOS** is a self-hosted, human-in-the-loop B2B lead discovery, website-audit, and mini-CRM platform built for web agencies and freelancers. It discovers local businesses in Turkey via **Apify Google Maps**, audits website health (SSL, mobile viewport, speed & redesign opportunities), searches the web to uncover **hidden websites, Meta Ad Library presence, and commission-based delivery platforms** (Yemeksepeti, GetirYemek, Trendyol Yemek, Migros Yemek, Uber Eats, Instagram, TripAdvisor), scores opportunities with **Gemini AI**, generates **one-click live demo websites**, and tracks deals on a **Dark Mode CRM Kanban board**.
 
 ![LeadOS Desktop Dashboard](qa-desktop-drawer.png)
 
