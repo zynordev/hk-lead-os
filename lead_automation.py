@@ -64,20 +64,32 @@ _SAFE_OPENER = build_opener(_SafeRedirectHandler())
 
 
 def check_website(url: str) -> dict[str, Any]:
-    """Fetch a public business URL and classify availability/content safely."""
-    result: dict[str, Any] = {"url": url, "status": "broken", "http_status": None, "title": "", "content_preview": "", "findings": []}
+    """Fetch a public business URL and classify availability, SSL, mobile viewport & speed."""
+    import time as _time
+    result: dict[str, Any] = {
+        "url": url, "status": "broken", "http_status": None, "title": "",
+        "content_preview": "", "findings": [], "has_ssl": False,
+        "has_mobile_viewport": False, "response_time_ms": None, "needs_redesign": False,
+    }
     try:
         ok, target_url, reason = _validate_public_url(url)
         if not ok:
             result["findings"] = [reason]
             return result
         req = Request(target_url, headers={"User-Agent": "HK-Yazilim-LeadAudit/1.0 (+https://hkyazilim.com.tr)", "Accept": "text/html,application/xhtml+xml"})
+        t0 = _time.monotonic()
         with _SAFE_OPENER.open(req, timeout=WEB_TIMEOUT) as response:
+            elapsed_ms = int((_time.monotonic() - t0) * 1000)
+            final_url = str(getattr(response, "url", target_url) or target_url)
             result["http_status"] = response.status
+            result["response_time_ms"] = elapsed_ms
+            result["has_ssl"] = final_url.lower().startswith("https://")
             raw = response.read(WEB_MAX_BYTES + 1)
             text = raw[:WEB_MAX_BYTES].decode("utf-8", errors="replace")
         import re as _re
         title = _re.search(r"<title[^>]*>(.*?)</title>", text, _re.I | _re.S)
+        has_viewport = bool(_re.search(r'<meta[^>]+name=["\']viewport["\']', text, _re.I))
+        result["has_mobile_viewport"] = has_viewport
         visible = _re.sub(r"<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<[^>]+>", " ", text, flags=_re.I | _re.S)
         visible = " ".join(visible.split())[:800]
         result.update({"title": title.group(1).strip()[:200] if title else "", "content_preview": visible})
@@ -88,8 +100,20 @@ def check_website(url: str) -> dict[str, Any]:
             result["status"] = "poor"
             result["findings"] = ["Site yanıt veriyor ancak anlamlı işletme içeriği çok az veya alan adı park edilmiş."]
         else:
-            result["status"] = "live"
-            result["findings"] = [f"HTTP {response.status}; içerik bulundu ({len(visible)} karakter önizleme)."]
+            tech_issues: list[str] = []
+            if not result["has_ssl"]:
+                tech_issues.append("SSL (HTTPS) yok")
+            if not has_viewport:
+                tech_issues.append("mobil viewport etiketi yok (mobil uyumsuz)")
+            if elapsed_ms > 4500:
+                tech_issues.append(f"yavaş açılıyor ({elapsed_ms} ms)")
+            if tech_issues:
+                result["status"] = "redesign"
+                result["needs_redesign"] = True
+                result["findings"] = [f"Site açık ({elapsed_ms} ms) fakat teknik eksikler var: {', '.join(tech_issues)}."]
+            else:
+                result["status"] = "live"
+                result["findings"] = [f"HTTP {response.status} · HTTPS & mobil uyumlu ({elapsed_ms} ms)."]
     except (HTTPError, URLError, TimeoutError, socket.timeout, ValueError, OSError) as exc:
         result["findings"] = [f"Siteye erişilemedi: {type(exc).__name__}."]
     return result
@@ -347,6 +371,7 @@ def discover_google_sites(places: list[dict[str, Any]], token: str, progress) ->
             place["online_platforms"] = info.get("online_platforms") or []
             place["delivery_platforms"] = info.get("delivery_platforms") or []
             place["platform_links"] = info.get("platform_links") or {}
+            place["ad_library_url"] = info.get("ad_library_url") or ""
             place["web_search_evidence"] = info
             if info.get("discovered_instagram") and not place_website(place):
                 place["discovered_instagram"] = info["discovered_instagram"]

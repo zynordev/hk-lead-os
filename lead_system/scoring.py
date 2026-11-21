@@ -11,6 +11,10 @@ def score_lead(lead: dict[str, Any]) -> dict[str, Any]:
     if not lead.get("website_url") or is_social_url(lead.get("website_url")) or is_directory_url(lead.get("website_url")):
         score += 35
         reasons.append("Web sitesi bulunamadı.")
+    elif lead.get("website_status") == "redesign":
+        score += 22
+        findings = "; ".join(lead.get("website_findings") or [])
+        reasons.append(findings or "Mevcut web sitesi mobil uyumsuz / SSL eksik / yavaş; yeniden tasarım fırsatı.")
     elif lead.get("website_status") in {"broken", "insecure", "poor"}:
         score += 25
         reasons.append("Mevcut web sitesinde kalite/erişilebilirlik sorunu var.")

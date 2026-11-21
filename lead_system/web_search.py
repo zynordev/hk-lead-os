@@ -215,6 +215,8 @@ def search_business_presence(
             if _match_official_website(clean_name, url, title, snippet):
                 discovered_website = url
 
+    from urllib.parse import quote
+    ad_library_url = f"https://www.facebook.com/ads/library/?active_status=active&ad_type=all&country=TR&q={quote(clean_name)}"
     return {
         "search_query": query,
         "discovered_website": discovered_website,
@@ -223,5 +225,6 @@ def search_business_presence(
         "delivery_platforms": delivery_platforms,
         "social_platforms": social_platforms,
         "platform_links": platform_links,
+        "ad_library_url": ad_library_url,
         "results_count": len(results),
     }
