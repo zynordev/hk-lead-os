@@ -12,9 +12,11 @@ from urllib.parse import parse_qs, urlparse
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from .preview_generator import generate_demo_html
 from .scoring import score_lead
 from .sheets import GoogleSheetsAdapter
 from .store import LeadStore
+from .wacli_bridge import send_via_wacli, wacli_configured
 
 
 ROOT = Path(__file__).resolve().parent
@@ -178,7 +180,37 @@ class Handler(BaseHTTPRequestHandler):
             html = f"<!doctype html><meta charset='utf-8'><title>Google Sheets bağlandı</title><style>body{{font:16px system-ui;display:grid;place-items:center;min-height:100vh;background:#f5f7fb}}main{{background:#fff;padding:28px;border-radius:16px;box-shadow:0 15px 50px #0001}}</style><main><h1>Google Sheets bağlandı</h1><p>HK LeadOS işletme havuzu oluşturuldu ve {sync.get('count', 0)} aday senkronize edildi.</p><a href='/'>Dashboard’a dön</a></main>"
             self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8"); self.send_header("Content-Length", str(len(html.encode()))); self.end_headers(); self.wfile.write(html.encode()); return
         elif path == "/api/health":
-            self._json(200, {"ok": True, "leads": len(store.list()), "sheets_configured": GoogleSheetsAdapter().configured, "scan": scan_record})
+            self._json(200, {
+                "ok": True,
+                "leads": len(store.list()),
+                "storage": "sqlite",
+                "sheets_configured": GoogleSheetsAdapter().configured,
+                "wacli_configured": wacli_configured(),
+                "scan": scan_record,
+            })
+        elif path == "/api/export.csv":
+            csv_bytes = store.export_csv().encode("utf-8")
+            self.send_response(200)
+            self._security_headers()
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", 'attachment; filename="hk-leados-leads.csv"')
+            self.send_header("Content-Length", str(len(csv_bytes)))
+            self.end_headers()
+            self.wfile.write(csv_bytes)
+        elif path.startswith("/preview/"):
+            lead_id = path.removeprefix("/preview/").strip()
+            try:
+                lead = store.get(lead_id)
+            except KeyError:
+                self._json(404, {"error": "lead_not_found"}); return
+            page = generate_demo_html(lead).encode("utf-8")
+            self.send_response(200)
+            self._security_headers()
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
         elif path == "/api/leads":
             self._json(200, api_leads())
         elif path == "/api/stats":
@@ -217,15 +249,21 @@ class Handler(BaseHTTPRequestHandler):
                 result = store.opt_out(lead_id); sync_sheets_safely(); self._json(200, result); return
             if path == "/api/score":
                 lead = store.get(lead_id); result = score_lead(lead); updated = store.update(lead_id, **result); sync_sheets_safely(); self._json(200, updated); return
+            if path == "/api/crm-stage":
+                updated = store.set_crm_stage(lead_id, str(data.get("stage") or ""))
+                self._json(200, updated); return
             if path == "/api/send":
                 lead = store.get(lead_id)
                 if lead.get("approval_status") != "approved": raise ValueError("Önce manuel onay gerekli")
                 if lead.get("opt_out_status") or lead.get("send_status") == "sent": raise ValueError("Gönderim engellendi veya zaten gönderildi")
-                token = os.getenv("WHATSAPP_APPROVAL_TOKEN", "")
-                payload = {"lead_id": lead_id, "phone": lead.get("phone"), "message": lead.get("message_draft"), "approved": True, "approval_token": token}
-                req = Request("http://127.0.0.1:8787/send", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
-                with urlopen(req, timeout=30) as response: result = json.loads(response.read())
-                updated = store.update(lead_id, send_status="sent", sent_at=result.get("sent_at"), approval_status="sent"); sync_sheets_safely(); self._json(200, updated); return
+                if os.getenv("WHATSAPP_TRANSPORT", "").lower() == "wacli" or wacli_configured():
+                    result = send_via_wacli(str(lead.get("phone") or ""), str(lead.get("message_draft") or ""))
+                else:
+                    token = os.getenv("WHATSAPP_APPROVAL_TOKEN", "")
+                    payload = {"lead_id": lead_id, "phone": lead.get("phone"), "message": lead.get("message_draft"), "approved": True, "approval_token": token}
+                    req = Request("http://127.0.0.1:8787/send", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
+                    with urlopen(req, timeout=30) as response: result = json.loads(response.read())
+                updated = store.update(lead_id, send_status="sent", sent_at=result.get("sent_at"), approval_status="sent", crm_stage="contacted"); sync_sheets_safely(); self._json(200, updated); return
             if path == "/api/scan/start":
                 self._json(202, start_scan(data)); return
             if path == "/api/scan/stop":
