@@ -15,11 +15,11 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent
 _DEFAULT_WORKERS = "/home/halil/zynordev/agent workers" if os.name != "nt" else r"C:\Users\Halil Erdem Yanık\zynordev\agent workers"
 WORKERS_ROOT = Path(os.environ.get("HK_AGENTS_ROOT", _DEFAULT_WORKERS))
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-lite-latest")
 _GEMINI_FALLBACK_MODELS = (
-    "gemini-flash-latest",
     "gemini-flash-lite-latest",
     "gemini-3.5-flash-lite",
+    "gemini-flash-latest",
     "gemini-2.5-flash",
 )
 
@@ -66,7 +66,7 @@ def _call_gemini_rest(prompt: str, system_instruction: str = "") -> str:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         req = Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
         try:
-            with urlopen(req, timeout=45) as resp:
+            with urlopen(req, timeout=20) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             candidates = data.get("candidates") or []
             parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
@@ -77,7 +77,9 @@ def _call_gemini_rest(prompt: str, system_instruction: str = "") -> str:
             if exc.code in {404, 429, 500, 503}:
                 continue
             return ""
-        except (URLError, TimeoutError, OSError, json.JSONDecodeError, KeyError, IndexError):
+        except (URLError, TimeoutError, OSError):
+            continue
+        except (json.JSONDecodeError, KeyError, IndexError):
             return ""
     return ""
 
