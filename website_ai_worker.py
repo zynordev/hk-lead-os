@@ -15,7 +15,26 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parent
 _DEFAULT_WORKERS = "/home/halil/zynordev/agent workers" if os.name != "nt" else r"C:\Users\Halil Erdem Yanık\zynordev\agent workers"
 WORKERS_ROOT = Path(os.environ.get("HK_AGENTS_ROOT", _DEFAULT_WORKERS))
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+_GEMINI_FALLBACK_MODELS = (
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash-lite",
+    "gemini-2.5-flash",
+)
+
+
+def _extract_api_key_from_text(text: str) -> str:
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            _, val = line.split("=", 1)
+            line = val.strip().strip("\"'")
+        if line.startswith(("AIza", "AQ.")) and len(line) >= 25:
+            return line
+    return ""
 
 
 def _load_gemini_api_key() -> str:
@@ -24,10 +43,9 @@ def _load_gemini_api_key() -> str:
         return env_key
     for candidate in (ROOT / "geminiapikey.txt", WORKERS_ROOT / "geminiapikey.txt"):
         if candidate.exists():
-            for line in candidate.read_text(encoding="utf-8", errors="ignore").splitlines():
-                line = line.strip()
-                if line and not line.startswith("#") and line.startswith("AIza"):
-                    return line
+            found = _extract_api_key_from_text(candidate.read_text(encoding="utf-8", errors="ignore"))
+            if found:
+                return found
     return ""
 
 
@@ -36,27 +54,32 @@ def _call_gemini_rest(prompt: str, system_instruction: str = "") -> str:
     api_key = _load_gemini_api_key()
     if not api_key:
         return ""
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={api_key}"
     payload: dict[str, Any] = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.3},
     }
     if system_instruction:
         payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
-    req = Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urlopen(req, timeout=45) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-        candidates = data.get("candidates") or []
-        parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
-        return "".join(str(p.get("text") or "") for p in parts).strip()
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, KeyError, IndexError):
-        return ""
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    models = list(dict.fromkeys([GEMINI_MODEL, *_GEMINI_FALLBACK_MODELS]))
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+        req = Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+        try:
+            with urlopen(req, timeout=45) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            candidates = data.get("candidates") or []
+            parts = ((candidates[0].get("content") or {}).get("parts") or []) if candidates else []
+            text = "".join(str(p.get("text") or "") for p in parts).strip()
+            if text:
+                return text
+        except HTTPError as exc:
+            if exc.code in {404, 429, 500, 503}:
+                continue
+            return ""
+        except (URLError, TimeoutError, OSError, json.JSONDecodeError, KeyError, IndexError):
+            return ""
+    return ""
 
 
 def _extract_json(text: str) -> list[dict[str, Any]]:
@@ -102,6 +125,9 @@ def _clean_summary(text: str, lead: dict[str, Any]) -> str:
         parts.append("Instagram profili bulunamadı.")
     if not lead.get("website_url"):
         parts.append("İşletmenin doğrulanmış kendi web sitesi bulunmuyor.")
+    elif lead.get("website_status") == "redesign":
+        findings = "; ".join(lead.get("website_findings") or [])
+        parts.append(f"Mevcut web sitesi ({lead.get('website_url')}) açık ancak teknik iyileştirme fırsatı bulunuyor{f': {findings}' if findings else '.'}")
     return " ".join(parts)
 
 
@@ -125,8 +151,8 @@ def audit_leads(leads: list[dict[str, Any]], workers: int = 1) -> tuple[list[dic
         return [], ""
     evidence = [{"lead_id": x.get("lead_id"), "business_name": x.get("business_name"), "website_url": x.get("website_url"), "instagram_url": x.get("instagram_url"), "website_check": x.get("website_check"), "website_findings": x.get("website_findings"), "online_platforms": x.get("online_platforms") or [], "delivery_platforms": x.get("delivery_platforms") or [], "maps": {"description": (x.get("source_details") or {}).get("description"), "rating": (x.get("source_details") or {}).get("rating"), "reviews_count": (x.get("source_details") or {}).get("reviews_count"), "reviews": (x.get("source_details") or {}).get("reviews", [])[:10]}, "instagram": x.get("instagram_evidence") or {}} for x in leads]
     prompt = f"""Sen HK Yazılım'ın özel web sitesi denetim Gemini worker'ısın.
-Her aday için yalnızca aşağıdaki kanıtı değerlendir. website_url alanı Instagram, Facebook, TikTok, YouTube veya başka sosyal medya alan adıysa bunu gerçek web sitesi sayma. firmasec.com, buldum.com, yellowpages.com.tr, find.com.tr, iyifirma.com, foursquare.com, tripadvisor.com.tr, yelp.com gibi firma rehberi/dizin alan adlarını da işletmenin kendi web sitesi sayma; bunları directory/missing olarak işaretle. HTTP sonucu yoksa bunu kesin gerçek gibi yazma. Site erişilemiyorsa, park edilmişse veya içeriği yetersizse açıkça belirt. delivery_platforms (Yemeksepeti, GetirYemek, Trendyol Yemek, Migros Yemek, Uber Eats vb.) veya online_platforms kanıtı varsa işletmenin kendini hangi platformlarda tanıttığını/satış yaptığını özet paragrafında mutlaka belirt. Özet paragrafında mevcutsa Maps puanı/yorum sayısı ve yorum temalarını; Instagram takipçi sayısı, gönderi sayısı, son içerik tarihini ve içerik temasını mutlaka gerçek sayılarla kullan. Veri yoksa 'veri alınamadı' de, tahmin etme.
-Her aday için SADECE JSON array döndür; markdown kullanma. Alanlar: lead_id, website_class (missing/social/live/poor/broken), score (0-100), summary (Türkçe tek paragraf), reasons (string array), decision (ÖNER/İNCELE/ELE), recommended_service, confidence. Kanıt dışı bilgi üretme.
+Her aday için yalnızca aşağıdaki kanıtı değerlendir. website_url alanı Instagram, Facebook, TikTok, YouTube veya başka sosyal medya alan adıysa bunu gerçek web sitesi sayma. firmasec.com, buldum.com, yellowpages.com.tr, find.com.tr, iyifirma.com, foursquare.com, tripadvisor.com.tr, yelp.com gibi firma rehberi/dizin alan adlarını da işletmenin kendi web sitesi sayma; bunları directory/missing olarak işaretle. website_check.http_status 200 ise ve content_preview alanında işletmeye ait gerçek içerik varsa bu siteyi asla missing olarak işaretleme (sağlıklıysa live, SSL/mobil/hız eksiği varsa redesign olarak sınıflandır). HTTP sonucu yoksa bunu kesin gerçek gibi yazma. Site erişilemiyorsa, park edilmişse veya içeriği yetersizse açıkça belirt. delivery_platforms (Yemeksepeti, GetirYemek, Trendyol Yemek, Migros Yemek, Uber Eats vb.) veya online_platforms kanıtı varsa işletmenin kendini hangi platformlarda tanıttığını/satış yaptığını özet paragrafında mutlaka belirt. Özet paragrafında mevcutsa Maps puanı/yorum sayısı ve yorum temalarını; Instagram takipçi sayısı, gönderi sayısı, son içerik tarihini ve içerik temasını mutlaka gerçek sayılarla kullan. Veri yoksa 'veri alınamadı' de, tahmin etme.
+Her aday için SADECE JSON array döndür; markdown kullanma. Alanlar: lead_id, website_class (missing/social/live/redesign/poor/broken), score (0-100), summary (Türkçe tek paragraf), reasons (string array), decision (ÖNER/İNCELE/ELE), recommended_service, confidence. Kanıt dışı bilgi üretme.
 <UNTRUSTED_EVIDENCE>{json.dumps(evidence, ensure_ascii=False)}</UNTRUSTED_EVIDENCE>"""
     if WORKERS_ROOT.exists():
         prompt_file = ROOT / "lead_runs" / "_website_ai_prompt.txt"
@@ -157,6 +183,33 @@ def summarize_lead(lead: dict[str, Any]) -> str:
     return _clean_summary(raw, lead)
 
 
+def _fallback_message(lead: dict[str, Any]) -> str:
+    """Deterministic fallback outreach draft aligned with the verified website status."""
+    name = str(lead.get("business_name") or "İşletmeniz").strip()
+    status = str(lead.get("website_status") or "missing")
+    website = str(lead.get("website_url") or "").strip()
+    if status == "redesign" and website:
+        return (
+            f"Merhaba {name},\n\n"
+            f"Mevcut web sitenizi ({website}) inceledik; HTTPS güvenliği, mobil görünüm ve açılış hızı tarafında "
+            "iyileştirme fırsatları gördük. İsterseniz mevcut siteniz için kısa bir yenileme ve hızlandırma taslağı paylaşabiliriz.\n\n"
+            "HK Yazılım"
+        )
+    if status in {"broken", "poor"} and website:
+        return (
+            f"Merhaba {name},\n\n"
+            f"Google Haritalar'da yer alan web adresinizi ({website}) kontrol ettiğimizde erişim/içerik sorunu olduğunu gördük. "
+            "İşletmeniz için modern, mobil uyumlu ve hızlı bir web sitesi taslağı hazırlayıp paylaşmak isteriz.\n\n"
+            "HK Yazılım"
+        )
+    return (
+        f"Merhaba {name},\n\n"
+        "İşletmeniz için mobil uyumlu bir tanıtım sitesi ya da ürünlerinizi aracı komisyonu olmadan doğrudan satabileceğiniz "
+        "online sipariş sitesi konusunda kısa bir taslak hazırlayabiliriz. Uygun olursanız paylaşmak isteriz.\n\n"
+        "HK Yazılım"
+    )
+
+
 def generate_message(lead: dict[str, Any]) -> str:
     """Generate one evidence-based, business-specific outreach draft."""
     direct = _generate_message_direct(lead)
@@ -165,11 +218,13 @@ def generate_message(lead: dict[str, Any]) -> str:
     # The candidate audit already requests a message_draft in its strict JSON
     # contract. Reuse that isolated worker result first so the message and
     # decision are based on the exact same evidence snapshot.
-    audited, raw_audit = audit_leads([lead], workers=1)
+    audited, _ = audit_leads([lead], workers=1)
     if audited:
         candidate = audited[0].get("message_draft") or audited[0].get("message")
         if isinstance(candidate, str) and _valid_message(candidate):
             return candidate.strip()[:1600]
+    if not WORKERS_ROOT.exists():
+        return _fallback_message(lead)
     details = lead.get("source_details") or {}
     evidence = _sanitize_evidence({
         "business_name": lead.get("business_name"),
@@ -214,7 +269,7 @@ Kurallar:
     try:
         result = subprocess.run(command, cwd=WORKERS_ROOT, env=env, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
         if result.returncode != 0:
-            return ""
+            return _fallback_message(lead)
         text = result.stdout.strip()
         if not text and result.stderr:
             text = result.stderr.strip()
@@ -223,14 +278,16 @@ Kurallar:
             text = marked.group(1).strip()
         text = re.sub(r"```(?:text|markdown)?|```", "", text, flags=re.I).strip()
         if any(marker.lower() in text.lower() for marker in ("research analysis", "worker summary", "evidence:")):
-            return ""
+            return _fallback_message(lead)
         try:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
                 text = str(parsed.get("message_draft") or parsed.get("message") or "")
         except json.JSONDecodeError:
             pass
-        return text[:1600] if _valid_message(text) else ""
+        return text[:1600] if _valid_message(text) else _fallback_message(lead)
+    except OSError:
+        return _fallback_message(lead)
     finally:
         prompt_file.unlink(missing_ok=True)
 

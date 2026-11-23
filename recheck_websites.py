@@ -74,7 +74,10 @@ def main() -> None:
             removed += 1
             checked += 1
             continue
-        updated = store.update(lead["lead_id"], website_status=result["status"], website_findings=result["findings"], website_check=result)
+        updates = {"website_status": result["status"], "website_findings": result["findings"], "website_check": result}
+        if result.get("final_url") and str(result["final_url"]).lower().startswith("https://"):
+            updates["website_url"] = result["final_url"]
+        updated = store.update(lead["lead_id"], **updates)
         decision = score_lead(updated)
         store.update(lead["lead_id"], **decision, ai_summary=f"{updated.get('business_name', 'İşletme')} için otomatik ön değerlendirme: {decision['decision_reasons'][0]} Teklif seviyesi: {decision['decision']}.")
         checked += 1
@@ -83,7 +86,9 @@ def main() -> None:
         return
     candidates = store.list()
     results, raw = audit_leads(candidates, workers=1)
-    (store.path.parent.parent.parent / "lead_runs" / "website_ai_recheck.md").write_text(raw, encoding="utf-8")
+    recheck_out = store.db_path.parent.parent.parent / "lead_runs" / "website_ai_recheck.md"
+    recheck_out.parent.mkdir(parents=True, exist_ok=True)
+    recheck_out.write_text(raw, encoding="utf-8")
     for item in results:
         lead_id = item.get("lead_id")
         if not lead_id:

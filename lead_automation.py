@@ -63,11 +63,57 @@ class _SafeRedirectHandler(HTTPRedirectHandler):
 _SAFE_OPENER = build_opener(_SafeRedirectHandler())
 
 
-def check_website(url: str) -> dict[str, Any]:
-    """Fetch a public business URL and classify availability, SSL, mobile viewport & speed."""
+_BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+_AUDIT_UA = "HK-Yazilim-LeadAudit/1.0 (+https://hkyazilim.com.tr)"
+_PARKED_MARKERS = (
+    "domain for sale", "coming soon", "parked free", "account suspended",
+    "under construction", "buy this domain", "yapım aşamasında", "yapim asamasinda",
+    "çok yakında", "cok yakinda",
+)
+_QR_MENU_ONLY_HOSTS = ("finedinemenu.com", "menulux.com", "qr-menu.com", "menu-online.co")
+
+
+def _fetch_public_page(target_url: str, user_agent: str = _AUDIT_UA) -> tuple[int, str, str, int]:
+    """Fetch a validated public URL using the SSRF-safe opener."""
     import time as _time
+    ok, clean_url, reason = _validate_public_url(target_url)
+    if not ok:
+        raise ValueError(reason)
+    req = Request(clean_url, headers={"User-Agent": user_agent, "Accept": "text/html,application/xhtml+xml"})
+    t0 = _time.monotonic()
+    with _SAFE_OPENER.open(req, timeout=WEB_TIMEOUT) as response:
+        elapsed_ms = int((_time.monotonic() - t0) * 1000)
+        final_url = str(getattr(response, "url", clean_url) or clean_url)
+        raw = response.read(WEB_MAX_BYTES + 1)
+        text = raw[:WEB_MAX_BYTES].decode("utf-8", errors="replace")
+        return int(response.status), final_url, text, elapsed_ms
+
+
+def _looks_like_real_spa(html_text: str, title_text: str, final_url: str) -> bool:
+    """Detect real JS-rendered (SPA) websites that have rich HTML shell but short static text."""
+    if len(html_text) < 4000 or not title_text:
+        return False
+    host = (urlparse(final_url).hostname or "").lower().removeprefix("www.")
+    if any(host == h or host.endswith(f".{h}") for h in _QR_MENU_ONLY_HOSTS):
+        return False
+    bare_title = title_text.lower().strip().removeprefix("www.")
+    if bare_title == host:
+        return False
+    has_meta_desc = bool(re.search(r'<meta[^>]+name=["\']description["\'][^>]+content=["\'][^"\']{15,}', html_text, re.I))
+    has_spa_marker = bool(re.search(r'id=["\'](?:root|app|__next|__nuxt)["\']|application/ld\+json', html_text, re.I))
+    script_count = len(re.findall(r"<script\b", html_text, re.I))
+    return has_meta_desc or (has_spa_marker and script_count >= 1) or script_count >= 3
+
+
+def check_website(url: str) -> dict[str, Any]:
+    """Fetch a public business URL and classify availability, SSL, mobile viewport & speed.
+
+    When Google Maps provides an ``http://`` URL, probes ``https://`` first so
+    servers that support valid TLS without auto-redirecting HTTP->HTTPS are not
+    falsely flagged as lacking SSL.
+    """
     result: dict[str, Any] = {
-        "url": url, "status": "broken", "http_status": None, "title": "",
+        "url": url, "final_url": url, "status": "broken", "http_status": None, "title": "",
         "content_preview": "", "findings": [], "has_ssl": False,
         "has_mobile_viewport": False, "response_time_ms": None, "needs_redesign": False,
     }
@@ -76,27 +122,60 @@ def check_website(url: str) -> dict[str, Any]:
         if not ok:
             result["findings"] = [reason]
             return result
-        req = Request(target_url, headers={"User-Agent": "HK-Yazilim-LeadAudit/1.0 (+https://hkyazilim.com.tr)", "Accept": "text/html,application/xhtml+xml"})
-        t0 = _time.monotonic()
-        with _SAFE_OPENER.open(req, timeout=WEB_TIMEOUT) as response:
-            elapsed_ms = int((_time.monotonic() - t0) * 1000)
-            final_url = str(getattr(response, "url", target_url) or target_url)
-            result["http_status"] = response.status
-            result["response_time_ms"] = elapsed_ms
-            result["has_ssl"] = final_url.lower().startswith("https://")
-            raw = response.read(WEB_MAX_BYTES + 1)
-            text = raw[:WEB_MAX_BYTES].decode("utf-8", errors="replace")
-        import re as _re
-        title = _re.search(r"<title[^>]*>(.*?)</title>", text, _re.I | _re.S)
-        has_viewport = bool(_re.search(r'<meta[^>]+name=["\']viewport["\']', text, _re.I))
+
+        candidates: list[str] = []
+        if target_url.lower().startswith("http://"):
+            candidates.append("https://" + target_url[7:])
+        candidates.append(target_url)
+
+        fetched: tuple[int, str, str, int] | None = None
+        last_exc: Exception | None = None
+        for candidate in candidates:
+            try:
+                status, final_url, text, elapsed_ms = _fetch_public_page(candidate, _AUDIT_UA)
+                if status < 400:
+                    fetched = (status, final_url, text, elapsed_ms)
+                    break
+                fetched = (status, final_url, text, elapsed_ms)
+            except HTTPError as exc:
+                if exc.code in {403, 406}:
+                    try:
+                        status, final_url, text, elapsed_ms = _fetch_public_page(candidate, _BROWSER_UA)
+                        if status < 400:
+                            fetched = (status, final_url, text, elapsed_ms)
+                            break
+                    except Exception as retry_exc:
+                        last_exc = retry_exc
+                        continue
+                last_exc = exc
+            except (URLError, TimeoutError, socket.timeout, ValueError, OSError) as exc:
+                last_exc = exc
+
+        if fetched is None:
+            if last_exc is not None:
+                raise last_exc
+            result["findings"] = ["Siteye erişilemedi."]
+            return result
+
+        http_status, final_url, text, elapsed_ms = fetched
+        result["http_status"] = http_status
+        result["final_url"] = final_url
+        result["response_time_ms"] = elapsed_ms
+        result["has_ssl"] = final_url.lower().startswith("https://")
+
+        title = re.search(r"<title[^>]*>(.*?)</title>", text, re.I | re.S)
+        title_text = " ".join(title.group(1).split())[:200] if title else ""
+        has_viewport = bool(re.search(r'<meta[^>]+name=["\']viewport["\']', text, re.I))
         result["has_mobile_viewport"] = has_viewport
-        visible = _re.sub(r"<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<[^>]+>", " ", text, flags=_re.I | _re.S)
+        visible = re.sub(r"<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<[^>]+>", " ", text, flags=re.I | re.S)
         visible = " ".join(visible.split())[:800]
-        result.update({"title": title.group(1).strip()[:200] if title else "", "content_preview": visible})
-        lower = visible.lower()
-        if response.status >= 400:
-            result["findings"] = [f"HTTP {response.status} döndü."]
-        elif len(visible) < 80 or any(word in lower for word in ("domain for sale", "coming soon", "parked free", "account suspended")):
+        result.update({"title": title_text, "content_preview": visible})
+        combined_lower = f"{title_text} {visible}".lower()
+        is_parked = any(word in combined_lower for word in _PARKED_MARKERS)
+
+        if http_status >= 400:
+            result["findings"] = [f"HTTP {http_status} döndü."]
+        elif is_parked or (len(visible) < 80 and not _looks_like_real_spa(text, title_text, final_url)):
             result["status"] = "poor"
             result["findings"] = ["Site yanıt veriyor ancak anlamlı işletme içeriği çok az veya alan adı park edilmiş."]
         else:
@@ -113,7 +192,7 @@ def check_website(url: str) -> dict[str, Any]:
                 result["findings"] = [f"Site açık ({elapsed_ms} ms) fakat teknik eksikler var: {', '.join(tech_issues)}."]
             else:
                 result["status"] = "live"
-                result["findings"] = [f"HTTP {response.status} · HTTPS & mobil uyumlu ({elapsed_ms} ms)."]
+                result["findings"] = [f"HTTP {http_status} · HTTPS & mobil uyumlu ({elapsed_ms} ms)."]
     except (HTTPError, URLError, TimeoutError, socket.timeout, ValueError, OSError) as exc:
         result["findings"] = [f"Siteye erişilemedi: {type(exc).__name__}."]
     return result
@@ -626,7 +705,16 @@ def main() -> int:
         url = str(lead.get("website_url") or "").rstrip("/").lower()
         if url:
             check = preflight_checks.get(url) or by_url.get(url) or check_website(url)
-            store.update(lead["lead_id"], website_status=check["status"], website_findings=check["findings"], website_check=check)
+            update_fields: dict[str, Any] = {
+                "website_status": check["status"],
+                "website_findings": check["findings"],
+                "website_check": check,
+            }
+            if check.get("final_url") and str(check["final_url"]).lower().startswith("https://"):
+                update_fields["website_url"] = check["final_url"]
+            if check["status"] == "redesign":
+                update_fields["recommended_service"] = "Mevcut web sitesi yenileme (HTTPS, mobil uyumluluk ve hız optimizasyonu)"
+            store.update(lead["lead_id"], **update_fields)
         current = store.get(lead["lead_id"])
         decision = score_lead(current)
         summary = f"{current.get('business_name', 'İşletme')} için otomatik ön değerlendirme: {decision['decision_reasons'][0]} Teklif seviyesi: {decision['decision']}."
@@ -655,8 +743,13 @@ def main() -> int:
             "ai_confidence": str(clean.get("confidence") or "")[:100],
             "ai_evidence": clean.get("reasons") if isinstance(clean.get("reasons"), list) else [],
         }
-        if clean.get("website_class") in {"missing", "social", "live", "poor", "broken"}:
-            changes["website_status"] = "missing" if clean["website_class"] in {"missing", "social"} else clean["website_class"]
+        wc = lead.get("website_check") or {}
+        http_verified_site = bool(lead.get("website_url")) and wc.get("http_status") == 200 and lead.get("website_status") in {"live", "redesign"}
+        if clean.get("website_class") in {"missing", "social", "live", "redesign", "poor", "broken"}:
+            ai_status = "missing" if clean["website_class"] in {"missing", "social"} else clean["website_class"]
+            # Never let the model contradict a live HTTP 200 verification by calling it missing.
+            if not (http_verified_site and ai_status == "missing"):
+                changes["website_status"] = ai_status
         if isinstance(clean.get("score"), (int, float)):
             changes["ai_score"] = max(0, min(100, int(clean["score"])))
         if clean.get("decision") in {"ÖNER", "İNCELE", "ELE"}:
@@ -665,7 +758,10 @@ def main() -> int:
             changes["decision_reasons"] = [str(x)[:500] for x in clean["reasons"][:8]]
         if clean.get("recommended_service"):
             changes["recommended_service"] = str(clean["recommended_service"])[:300]
-        store.update(lead["lead_id"], **changes)
+        updated_lead = store.update(lead["lead_id"], **changes)
+        if updated_lead.get("website_status") == "live":
+            store.remove(lead["lead_id"])
+    current_leads = [x for x in store.list() if x.get("latest_run_id") == run_id]
     progress(78, "Maps ve Instagram kanıtları Gemini Worker'a aktarıldı")
 
     # The bridge may return a synthesized report instead of machine-readable JSON.
